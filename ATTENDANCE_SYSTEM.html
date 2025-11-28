@@ -116,6 +116,12 @@
             .responsive-table td.p-0 {
                 padding: 0;
             }
+
+            /* Mobile Header Adjustments */
+            .mobile-header-buttons button {
+                padding: 0.5rem; /* Give buttons some space */
+            }
+            .mobile-header-buttons .button-text { display: none; } /* Hide text on mobile buttons */
         }
     </style>
 
@@ -132,7 +138,7 @@
             Plus, Trash2, Save, Clock, MapPin, User, FileText, CheckSquare, 
             Printer, Search, ChevronLeft, Briefcase, PenTool, History, 
             FileSpreadsheet, Download, Users, X, Check, Lock, LogOut, 
-            ShieldCheck, KeyRound, ChevronDown, UserPlus, ArrowLeft, AlertCircle, 
+            ShieldCheck, KeyRound, ChevronDown, UserPlus, ArrowLeft, AlertCircle, Menu,
             RotateCcw, Sun, Moon, Sunset, HardDrive, Upload, Wifi, WifiOff, 
             RefreshCw, Database, Cloud, QrCode, BookOpen, Play, HelpCircle
         } from 'lucide-react';
@@ -190,7 +196,7 @@
                             type: meeting.type,
                             site: meeting.site,
                             conducted_by: meeting.conductedBy,
-                            conductor_signature: meeting.conductorSignature || false,
+                            conductor_signature: meeting.conductorSignature || null,
                             conductor_sign_time: meeting.conductorSignTime || null,
                             minutes: meeting.minutes || ''
                         })
@@ -211,7 +217,7 @@
                                 name: att.name,
                                 company: att.company,
                                 job_title: att.jobTitle,
-                                signature: att.signature || false,
+                                signature: att.signature || null,
                                 sign_time: att.signTime || null,
                                 is_late: checkIsLate(att.signTime, meeting.startTime)
                             }));
@@ -945,6 +951,7 @@
             const [jobTitle, setJobTitle] = useState('');
             const [signature, setSignature] = useState(null);
             const [signingOpen, setSigningOpen] = useState(false);
+            const [isConductor, setIsConductor] = useState(false); // New state for conductor checkbox
             const [successMsg, setSuccessMsg] = useState('');
             
             // Live Clock for Kiosk
@@ -959,13 +966,14 @@
                     alert("Please fill all fields and sign.");
                     return;
                 }
-                onSubmit({ name, company, jobTitle, signature });
+                onSubmit({ name, company, jobTitle, signature, isConductor }); // Pass isConductor state
                 setSuccessMsg(`Attendance recorded for ${name}. Please hand over to next person.`);
                 setTimeout(() => {
                     setSuccessMsg('');
                     setName('');
                     setCompany('');
                     setJobTitle('');
+                    setIsConductor(false); // Reset checkbox
                     setSignature(null);
                 }, 3000);
             };
@@ -1026,6 +1034,13 @@
                                 <div onClick={() => setSigningOpen(true)} className={`w-full h-24 border-2 border-dashed rounded-md flex items-center justify-center cursor-pointer ${signature ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}>
                                     {signature ? <img src={signature} className="h-full object-contain" /> : <div className="text-gray-400 flex items-center"><PenTool size={16} className="mr-2"/> Tap to Sign</div>}
                                 </div>
+                            </div>
+                            {/* New Conductor Checkbox */}
+                            <div className="flex items-center justify-center pt-2">
+                                <label className="flex items-center cursor-pointer">
+                                    <input type="checkbox" checked={isConductor} onChange={(e) => setIsConductor(e.target.checked)} className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
+                                    <span className="ml-3 text-sm font-medium text-gray-700">I am the Conductor</span>
+                                </label>
                             </div>
                             <button onClick={handleSubmit} className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold text-lg shadow-md hover:bg-blue-700 transition-all">Submit Attendance</button>
                         </div>
@@ -1153,22 +1168,21 @@
                     if (connectionStatus === 'online') {
                         // Layer 4: Supabase cloud backup
                         const saveTimer = setTimeout(async () => {
-                            setConnectionStatus('syncing');
-                            
-                            // Save ALL modified sheets, not just the most recent
-                            const savePromises = sheets.map(async (sheet) => {
-                                const result = await SupabaseService.saveMeeting(sheet);
-                                return result;
-                            });
-                            
                             try {
+                                setConnectionStatus('syncing');
+                                
+                                // CORRECTED LOGIC: Save ALL sheets to ensure data integrity.
+                                // This is more robust than trying to find only "dirty" sheets.
+                                const savePromises = sheets.map(sheet => SupabaseService.saveMeeting(sheet));
+                                
                                 await Promise.all(savePromises);
                                 setConnectionStatus('online');
+                                setShowToast(true); // Show success toast after successful sync
                             } catch (error) {
                                 console.error('Error saving to Supabase:', error);
                                 setConnectionStatus('offline');
                             }
-                        }, 2000);
+                        }, 3000); // Increased debounce time to 3 seconds
 
                         return () => clearTimeout(saveTimer);
                     }
@@ -1378,7 +1392,8 @@
                     company: data.company,
                     jobTitle: data.jobTitle,
                     signature: data.signature,
-                    signTime: timeStr,
+                    signTime: timeStr, // e.g., "14:30"
+                    isConductor: data.isConductor, // Capture if they are the conductor
                     isLate: false
                 };
 
@@ -1408,6 +1423,13 @@
                             if (s.startTime) {
                                 newAttendee.isLate = checkIsLate(timeStr, s.startTime);
                             }
+                            // If attendee marked themselves as conductor, update the sheet details
+                            if (newAttendee.isConductor) {
+                                s.conductedBy = newAttendee.name;
+                                s.conductorSignature = newAttendee.signature;
+                                s.conductorSignTime = newAttendee.signTime;
+                            }
+
                             const realAttendees = s.attendees.filter(a => a.name && a.name.trim() !== '');
                             return { ...s, updatedAt: new Date().toISOString(), attendees: [...realAttendees, newAttendee] };
                         });
@@ -1422,13 +1444,21 @@
                     const isLateAuto = checkIsLate(timeStr, defaultTimes.start);
                     newAttendee.isLate = isLateAuto;
 
+                    let conductorDetails = {};
+                    // If they are the conductor, prepare the details for the new sheet
+                    if (newAttendee.isConductor) {
+                        conductorDetails = {
+                            conductedBy: newAttendee.name,
+                            conductorSignature: newAttendee.signature,
+                            conductorSignTime: newAttendee.signTime
+                        };
+                    }
+
                     const newSheet = {
                         id: newSheetId, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), 
-                        type: 'Meeting', topic: '', 
-                        meetingName: 'New Attendance Sheet', date: today, 
+                        type: 'Meeting', topic: '', meetingName: 'New Attendance Sheet', date: today, 
                         session: autoSession, startTime: defaultTimes.start,
-                        endTime: defaultTimes.end, duration: calculateDuration(defaultTimes.start, defaultTimes.end), 
-                        site: '', conductedBy: '', conductorSignature: null, conductorSignTime: null,
+                        endTime: defaultTimes.end, duration: calculateDuration(defaultTimes.start, defaultTimes.end), site: '', ...conductorDetails,
                         attendees: [newAttendee], minutes: ''
                     };
                     
@@ -1494,6 +1524,11 @@
                         <header className="bg-white border-b h-16 flex items-center justify-between px-6 shadow-sm print:hidden">
                             <div className="flex items-center">{!sidebarOpen && <button onClick={() => setSidebarOpen(true)} className="mr-4 text-gray-500"><Search size={20} /></button>}<h1 className="text-xl font-bold text-gray-800"><span className="text-blue-900 mr-2">PAMICOR</span> <span className="text-sm text-gray-600 font-normal">| Attendance System</span></h1></div>
                             <div className="flex items-center space-x-2">
+                            <div className="flex items-center">
+                                <button onClick={() => setSidebarOpen(!sidebarOpen)} className="mr-4 text-gray-500 md:hidden"><Menu size={24} /></button>
+                                <h1 className="text-lg md:text-xl font-bold text-gray-800"><span className="text-blue-900 mr-2">PAMICOR</span> <span className="hidden md:inline text-sm text-gray-600 font-normal">| Attendance System</span></h1>
+                            </div>
+                            <div className="flex items-center space-x-1 md:space-x-2 mobile-header-buttons">
                                 <div className="hidden md:block mr-4 text-right">
                                     <div className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">System Time</div>
                                     <div className="text-sm font-mono font-bold text-gray-700">{adminTime.toLocaleTimeString('en-GB')}</div>
@@ -1504,10 +1539,18 @@
                                 <button onClick={() => window.print()} className="flex items-center text-gray-600 hover:text-blue-600 px-3 py-2 rounded hover:bg-blue-50"><Printer size={18} className="mr-2"/> Print</button>
                                 <div className="h-6 w-px bg-gray-300 mx-2"></div>
                                 <button onClick={() => { setView('login'); setCurrentUser(null); setActiveSheetId(null); }} className="flex items-center text-red-500 hover:text-red-700 px-3 py-2 rounded hover:bg-red-50"><LogOut size={18} /></button>
+                                <button onClick={handleManualSave} className="flex items-center bg-blue-50 text-blue-600 hover:bg-blue-100 px-2 py-2 rounded transition-colors border border-blue-200" title="Save Progress"><Save size={18} className="md:mr-2"/> <span className="button-text">Save</span></button>
+                                <button onClick={() => setQrCodeOpen(true)} className="flex items-center bg-purple-50 text-purple-600 hover:bg-purple-100 px-2 py-2 rounded transition-colors border border-purple-200" title="System QR Code"><QrCode size={18} className="md:mr-2"/> <span className="button-text">System QR</span></button>
+                                {activeSheet && <button onClick={() => downloadCSV(generateSheetCSV(activeSheet), `Attendance_${activeSheet.date}.csv`)} className="hidden md:flex items-center text-gray-600 hover:text-green-600 px-3 py-2 rounded hover:bg-green-50"><Download size={18} className="mr-2"/> Export</button>}
+                                <button onClick={() => window.print()} className="hidden md:flex items-center text-gray-600 hover:text-blue-600 px-3 py-2 rounded hover:bg-blue-50"><Printer size={18} className="mr-2"/> Print</button>
+                                <div className="hidden md:block h-6 w-px bg-gray-300 mx-2"></div>
+                                <button onClick={() => { setView('login'); setCurrentUser(null); setActiveSheetId(null); }} className="flex items-center text-red-500 hover:text-red-700 px-2 py-2 rounded hover:bg-red-50" title="Logout"><LogOut size={18} /></button>
                             </div>
                         </header>
 
                         <div className="flex-grow overflow-y-auto bg-gray-100 p-4 md:p-8 print:p-0 print:bg-white">
+                            {/* Overlay for when sidebar is open on mobile */}
+                            {sidebarOpen && <div onClick={() => setSidebarOpen(false)} className="fixed inset-0 bg-black bg-opacity-50 z-20 md:hidden"></div>}
                             {!activeSheet ? (
                                 <div className="flex h-full flex-col items-center justify-center"><div className="text-center max-w-md"><div className="bg-blue-900 text-white p-4 rounded-full inline-block mb-4"><Briefcase size={48} /></div><h1 className="text-2xl font-bold text-gray-800 mb-2">Welcome, {currentUser}</h1><button onClick={createNewSheet} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-medium">Start New Attendance Sheet</button></div></div>
                             ) : (
